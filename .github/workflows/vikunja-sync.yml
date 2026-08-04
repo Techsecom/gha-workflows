@@ -1,0 +1,103 @@
+# =============================================================================
+# Reusable workflow: GitHub issues -> Vikunja tasks
+# =============================================================================
+# Lives in a PUBLIC repo so both the Techsecom and galanteum orgs can call it.
+# Contains NO secrets — the caller passes VIKUNJA_API_TOKEN (org Actions secret,
+# set by Terraform Phase 2). Idempotency: the Vikunja task title is prefixed with
+# a stable marker "[<repo>#<number>]" and looked up by search before create.
+#
+# Caller (in each participating repo, .github/workflows/vikunja.yml):
+#   name: vikunja
+#   on:
+#     issues:
+#       types: [opened, edited, closed, reopened]
+#   jobs:
+#     sync:
+#       uses: <PUBLIC_OWNER>/<PUBLIC_REPO>/.github/workflows/vikunja-sync.yml@main
+#       with:
+#         vikunja_project_id: "42"        # the Vikunja project for this repo
+#         # runs_on: gitops-k8s-runners   # Techsecom self-hosted; omit for hosted
+#       secrets:
+#         VIKUNJA_API_TOKEN: ${{ secrets.VIKUNJA_API_TOKEN }}
+# =============================================================================
+name: vikunja-sync
+
+on:
+  workflow_call:
+    inputs:
+      vikunja_project_id:
+        description: Numeric Vikunja project ID to sync issues into.
+        required: true
+        type: string
+      vikunja_url:
+        description: Base URL of the Vikunja API.
+        required: false
+        type: string
+        default: https://vikunja.ops.techsecom.io
+      runs_on:
+        description: Runner label (e.g. gitops-k8s-runners for Techsecom self-hosted).
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      VIKUNJA_API_TOKEN:
+        required: true
+
+jobs:
+  sync:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - name: Sync issue -> Vikunja task
+        env:
+          API: ${{ inputs.vikunja_url }}
+          PROJECT: ${{ inputs.vikunja_project_id }}
+          TOKEN: ${{ secrets.VIKUNJA_API_TOKEN }}
+          ACTION: ${{ github.event.action }}
+          NUMBER: ${{ github.event.issue.number }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          URL: ${{ github.event.issue.html_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: Bearer $TOKEN"
+          JSON="Content-Type: application/json"
+          # Stable marker embedded in the task title for idempotent lookup.
+          SHORTREPO="${REPO##*/}"
+          MARKER="[${SHORTREPO}#${NUMBER}]"
+          NEWTITLE="${MARKER} ${TITLE}"
+          # jq-safe description (link back to GitHub + body).
+          DESC=$(jq -n --arg u "$URL" --arg b "${BODY:-}" '"GitHub: " + $u + "\n\n" + $b')
+
+          # Find an existing task by the marker (search covers the title).
+          EXISTING=$(curl -sf -G "$API/api/v1/projects/$PROJECT/tasks" \
+            -H "$AUTH" --data-urlencode "s=$MARKER" \
+            | jq -r --arg m "$MARKER" 'map(select(.title | startswith($m))) | (.[0].id // empty)')
+
+          case "$ACTION" in
+            opened|edited|reopened)
+              DONE=false
+              [ "$ACTION" = "reopened" ] && DONE=false
+              if [ -n "$EXISTING" ]; then
+                echo "updating task $EXISTING"
+                curl -sf -X POST "$API/api/v1/tasks/$EXISTING" -H "$AUTH" -H "$JSON" \
+                  -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" --argjson done $DONE \
+                        '{title:$t, description:$d, done:$done}')" >/dev/null
+              else
+                echo "creating task for $MARKER"
+                curl -sf -X PUT "$API/api/v1/projects/$PROJECT/tasks" -H "$AUTH" -H "$JSON" \
+                  -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" '{title:$t, description:$d}')" >/dev/null
+              fi
+              ;;
+            closed)
+              if [ -n "$EXISTING" ]; then
+                echo "marking task $EXISTING done"
+                curl -sf -X POST "$API/api/v1/tasks/$EXISTING" -H "$AUTH" -H "$JSON" \
+                  -d '{"done":true}' >/dev/null
+              else
+                echo "no task found for $MARKER; nothing to close"
+              fi
+              ;;
+            *)
+              echo "action '$ACTION' not handled; skipping" ;;
+          esac
