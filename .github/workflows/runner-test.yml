@@ -1,0 +1,8 @@
+name: runner-test
+on:
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: gitops-k8s-runners
+    steps:
+      - run: echo "runner picked up the job on $(hostname)"
