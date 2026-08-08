@@ -109,8 +109,16 @@ jobs:
             closed)
               if [ -n "$EXISTING" ]; then
                 echo "marking task $EXISTING done"
+                # POST /api/v1/tasks/{id} REPLACES the task — it is not a patch.
+                # Sending only {"done":true} therefore WIPED the description on
+                # every close (proved against the live API: a task with a 57-char
+                # description had 0 chars after exactly this call). galanteum#2340
+                # was found with done=true and an empty body because of it.
+                # Resend title+description alongside `done` so the close marks the
+                # task complete without destroying what it says.
                 curl -sf -X POST "$API/api/v1/tasks/$EXISTING" -H "$AUTH" -H "$JSON" \
-                  -d '{"done":true}' >/dev/null
+                  -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" \
+                        '{title:$t, description:$d, done:true}')" >/dev/null
               else
                 echo "no task found for $MARKER; nothing to close"
               fi
