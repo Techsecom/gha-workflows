@@ -123,6 +123,32 @@ jobs:
                 echo "no task found for $MARKER; nothing to close"
               fi
               ;;
+            deleted)
+              # The GitHub issue is GONE, so the task tracking it should go too —
+              # otherwise the board accumulates rows pointing at 404s. Closed issues
+              # deliberately do NOT come through here: they stay as done tasks so the
+              # board remains a record of completed work.
+              #
+              # NOTE `transferred` is intentionally NOT mapped here. It fires on the
+              # SOURCE repo, and deleting there would silently lose the task whenever
+              # the destination repo does not also run this sync. A stale task is
+              # recoverable; a vanished one is not.
+              if [ -n "$EXISTING" ]; then
+                echo "deleting task $EXISTING"
+                # Not `curl -sf`: under `set -e` a non-2xx would abort the run. A token
+                # without DELETE scope must warn, not fail the workflow.
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+                  -X DELETE "$API/api/v1/tasks/$EXISTING" -H "$AUTH")
+                case "$CODE" in
+                  2*) echo "deleted task $EXISTING" ;;
+                  401|403)
+                    echo "::warning::Vikunja token lacks DELETE scope (HTTP $CODE) — task $EXISTING left in place. Mint an API token with delete permission on Tasks and update the VIKUNJA_API_TOKEN secret." ;;
+                  *) echo "::warning::unexpected HTTP $CODE deleting task $EXISTING" ;;
+                esac
+              else
+                echo "no task found for $MARKER; nothing to delete"
+              fi
+              ;;
             *)
               echo "action '$ACTION' not handled; skipping" ;;
           esac
