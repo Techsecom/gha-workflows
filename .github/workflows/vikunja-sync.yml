@@ -66,8 +66,25 @@ jobs:
           SHORTREPO="${REPO##*/}"
           MARKER="[${SHORTREPO}#${NUMBER}]"
           NEWTITLE="${MARKER} ${TITLE}"
-          # jq-safe description (link back to GitHub + body).
-          DESC=$(jq -n --arg u "$URL" --arg b "${BODY:-}" '"GitHub: " + $u + "\n\n" + $b')
+          # Description for Vikunja. Two things this has to get right:
+          #
+          #   1. `jq -n` (no -r) emits a JSON-ENCODED string, so the description
+          #      arrived wrapped in literal double quotes with literal \n instead
+          #      of newlines — then --arg re-encoded it below. `-r` emits the raw
+          #      string so the single encoding at the --arg boundary is correct.
+          #   2. Vikunja stores/renders the description as HTML. An unescaped
+          #      body therefore LOSES anything tag-shaped to its sanitizer:
+          #      `<audio src={src}>` and `<track>` in a GitHub issue body
+          #      disappeared entirely, leaving the surrounding backticks behind
+          #      (which is how the sanitizer, rather than plain-text rendering,
+          #      was identified). Escape &<> and turn newlines into <br>.
+          #
+          # Titles are plain text on Vikunja's side and must NOT be escaped —
+          # that is why <audio> survives in the title but not the description.
+          DESC=$(jq -rn --arg u "$URL" --arg b "${BODY:-}" '
+            def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+            ("GitHub: " + ($u|esc) + "\n\n" + ($b|esc)) | gsub("\n";"<br>")
+          ')
 
           # Find an existing task by the marker (search covers the title).
           EXISTING=$(curl -sf -G "$API/api/v1/projects/$PROJECT/tasks" \
