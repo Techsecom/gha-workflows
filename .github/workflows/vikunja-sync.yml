@@ -86,10 +86,62 @@ jobs:
             ("GitHub: " + ($u|esc) + "\n\n" + ($b|esc)) | gsub("\n";"<br>")
           ')
 
+          # Every Vikunja call goes through this so an API change reports the
+          # STATUS and BODY instead of a bare `curl -sf` exit 22. That opacity
+          # is not hypothetical: when Vikunja 2.x removed the task-list route
+          # below, 19 consecutive runs across TWO orgs failed with nothing in
+          # the log but "Process completed with exit code 22" — no status, no
+          # body, no indication of which of the four calls had broken.
+          api() {
+            local label=$1; shift
+            local out status body
+            out=$(curl -s -w $'\n%{http_code}' -H "$AUTH" "$@") || {
+              echo "::error::Vikunja $label — curl transport failure" >&2
+              return 1
+            }
+            status=${out##*$'\n'}
+            body=${out%$'\n'*}
+            case "$status" in
+              2*) printf '%s' "$body"; return 0 ;;
+            esac
+            echo "::error::Vikunja $label failed: HTTP $status" >&2
+            printf '%s\n' "$body" | head -c 800 >&2
+            return 1
+          }
+
+          # Resolve a project VIEW before listing tasks.
+          #
+          # Vikunja 2.x made this necessary. `GET /api/v1/projects/{id}/tasks`
+          # was REMOVED — the path still exists but is PUT-only (task creation),
+          # so the old GET started returning a non-2xx and `curl -sf` aborted
+          # the run under `set -e`. Confirmed against the instance's own
+          # OpenAPI document (`/api/v1/docs.json`, reports v2.5.0), which lists:
+          #     PUT  /projects/{id}/tasks
+          #     GET  /projects/{id}/views/{view}/tasks
+          # Listing a project's tasks now goes through a view.
+          #
+          # Prefer the `list` view (the plain flat listing); fall back to the
+          # lowest-positioned view of any kind so a project whose list view was
+          # deleted still syncs. `s=` behaves the same as before.
+          VIEWS=$(api "list views for project $PROJECT" -G "$API/api/v1/projects/$PROJECT/views")
+          VIEW=$(printf '%s' "$VIEWS" | jq -r '
+            (if type == "object" then (.results // .views // []) else . end) as $v
+            | ( ($v | map(select(.view_kind == "list")) | sort_by(.position) | .[0].id)
+                // ($v | sort_by(.position) | .[0].id)
+                // empty )')
+          if [ -z "$VIEW" ]; then
+            echo "::error::No project view found for Vikunja project $PROJECT — cannot look up tasks. Response was:" >&2
+            printf '%s\n' "$VIEWS" | head -c 800 >&2
+            exit 1
+          fi
+
           # Find an existing task by the marker (search covers the title).
-          EXISTING=$(curl -sf -G "$API/api/v1/projects/$PROJECT/tasks" \
-            -H "$AUTH" --data-urlencode "s=$MARKER" \
-            | jq -r --arg m "$MARKER" 'map(select(.title | startswith($m))) | (.[0].id // empty)')
+          EXISTING=$(api "search tasks in project $PROJECT view $VIEW" \
+            -G "$API/api/v1/projects/$PROJECT/views/$VIEW/tasks" \
+            --data-urlencode "s=$MARKER" \
+            | jq -r --arg m "$MARKER" '
+                (if type == "object" then (.results // .tasks // []) else . end)
+                | map(select(.title | startswith($m))) | (.[0].id // empty)')
 
           case "$ACTION" in
             opened|edited|reopened)
@@ -97,12 +149,12 @@ jobs:
               [ "$ACTION" = "reopened" ] && DONE=false
               if [ -n "$EXISTING" ]; then
                 echo "updating task $EXISTING"
-                curl -sf -X POST "$API/api/v1/tasks/$EXISTING" -H "$AUTH" -H "$JSON" \
+                api "update task $EXISTING" -X POST "$API/api/v1/tasks/$EXISTING" -H "$JSON" \
                   -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" --argjson done $DONE \
                         '{title:$t, description:$d, done:$done}')" >/dev/null
               else
                 echo "creating task for $MARKER"
-                curl -sf -X PUT "$API/api/v1/projects/$PROJECT/tasks" -H "$AUTH" -H "$JSON" \
+                api "create task for $MARKER" -X PUT "$API/api/v1/projects/$PROJECT/tasks" -H "$JSON" \
                   -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" '{title:$t, description:$d}')" >/dev/null
               fi
               ;;
@@ -116,7 +168,7 @@ jobs:
                 # was found with done=true and an empty body because of it.
                 # Resend title+description alongside `done` so the close marks the
                 # task complete without destroying what it says.
-                curl -sf -X POST "$API/api/v1/tasks/$EXISTING" -H "$AUTH" -H "$JSON" \
+                api "close task $EXISTING" -X POST "$API/api/v1/tasks/$EXISTING" -H "$JSON" \
                   -d "$(jq -n --arg t "$NEWTITLE" --arg d "$DESC" \
                         '{title:$t, description:$d, done:true}')" >/dev/null
               else
