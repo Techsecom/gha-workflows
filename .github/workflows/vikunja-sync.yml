@@ -103,6 +103,16 @@ jobs:
             body=${out%$'\n'*}
             case "$status" in
               2*) printf '%s' "$body"; return 0 ;;
+              401|403)
+                # A credential problem is an OPERATOR action, not a code defect,
+                # and this workflow is a NOTIFIER rather than a gate. Failing the
+                # run turns the repo red on EVERY issue event for as long as a
+                # token rotation is outstanding — noise on work unrelated to the
+                # sync. Warn loudly and let the run pass. Same reasoning the
+                # `deleted` branch below already applies to a missing DELETE scope.
+                echo "::warning::Vikunja $label: HTTP $status — VIKUNJA_API_TOKEN is missing, expired or invalid. Sync SKIPPED for this event. Mint a token with Projects+Views read and Tasks read/write, then set it in BOTH orgs." >&2
+                printf '%s\n' "$body" | head -c 400 >&2
+                return 2 ;;
             esac
             echo "::error::Vikunja $label failed: HTTP $status" >&2
             printf '%s\n' "$body" | head -c 800 >&2
@@ -123,7 +133,20 @@ jobs:
           # Prefer the `list` view (the plain flat listing); fall back to the
           # lowest-positioned view of any kind so a project whose list view was
           # deleted still syncs. `s=` behaves the same as before.
+          # This is the FIRST call, so it doubles as the auth preflight. `api`
+          # returns 2 for 401/403; treat that as "skip this event", not a failure.
+          # Every later call keeps hard-fail — once the token is known good, a
+          # non-2xx really is worth going red for.
+          set +e
           VIEWS=$(api "list views for project $PROJECT" -G "$API/api/v1/projects/$PROJECT/views")
+          VIEWS_RC=$?
+          set -e
+          if [ "$VIEWS_RC" -eq 2 ]; then
+            echo "Vikunja sync skipped for $MARKER — credential problem reported above."
+            exit 0
+          elif [ "$VIEWS_RC" -ne 0 ]; then
+            exit 1
+          fi
           VIEW=$(printf '%s' "$VIEWS" | jq -r '
             (if type == "object" then (.results // .views // []) else . end) as $v
             | ( ($v | map(select(.view_kind == "list")) | sort_by(.position) | .[0].id)
