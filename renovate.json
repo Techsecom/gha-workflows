@@ -1,0 +1,9 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>Techsecom/renovate-config"],
+  "description": [
+    "All policy lives in the shared preset github>Techsecom/renovate-config - schedule, PR limits, grouping, and the rules that hold major updates and terraform providers for Dependency Dashboard approval. Keep this file thin so the policy has one home.",
+    "No postUpgradeTasks here: this repo vendors no Helm charts. Only gitops-argocd does, and it needs `helm dependency update` to regenerate the .tgz ArgoCD actually renders.",
+    "tfvars are gitignored and hold live credentials. A PR touching one is a bug, not an update - close it and report."
+  ]
+}
